@@ -28,9 +28,13 @@ export async function createVzyClient(config) {
     const transport = config.transportFactory
         ? config.transportFactory({ roomId: config.roomId, clientId, serverUrl: config.serverUrl })
         : new WebSocketTransport(config.serverUrl, config.roomId, clientId, () => syncRef?.getLastSequence() ?? 0);
+    if (config.nodes && transport.setNodes)
+        transport.setNodes(config.nodes);
     const sync = new SyncEngine(transport, store, storage, {
         retryBaseMs: config.retryBaseMs ?? 1000,
-        maxRetryMs: config.maxRetryMs ?? 30_000
+        maxRetryMs: config.maxRetryMs ?? 30_000,
+        dedupTtlMs: config.dedupTtlMs ?? 120_000,
+        sequenceMode: config.sequenceMode ?? "local"
     }, { roomId: config.roomId, clientId }, (op) => {
         opLog.set(op.opId, op);
     });

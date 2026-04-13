@@ -1,5 +1,21 @@
 export type OperationType = "SET" | "DELETE";
 export type VzyValue = unknown;
+export type VzySequenceMode = "local" | "global";
+export type VzyNode = {
+    nodeId: string;
+    region: string;
+    url: string;
+    latency?: number;
+    healthy: boolean;
+};
+export type VzyEvent<T = VzyValue> = {
+    opId: string;
+    roomId: string;
+    clientId: string;
+    nodeId: string;
+    sequence: number;
+    payload: T;
+};
 export interface VzyOperation<T = VzyValue> {
     opId: string;
     type: OperationType;
@@ -9,18 +25,22 @@ export interface VzyOperation<T = VzyValue> {
     roomId: string;
     timestamp: number;
     sequence?: number;
+    nodeId?: string;
+    sourceNode?: string;
 }
 export interface VzyAck {
     type: "ACK";
     opId: string;
     roomId: string;
     sequence: number;
+    committed: boolean;
 }
 export interface VzyReconnect {
     type: "RECONNECT";
     roomId: string;
     clientId: string;
     lastSequence: number;
+    lastNodeId?: string;
 }
 export interface WALRecord {
     opId: string;
@@ -30,6 +50,9 @@ export interface WALRecord {
     sequence?: number;
     retryCount: number;
     nextRetryAt: number;
+    nodeId?: string;
+    sourceNode?: string;
+    timestamp: number;
 }
 export interface StoredValue<T = VzyValue> {
     value: T;
@@ -52,8 +75,19 @@ export interface Transport {
     send(op: VzyOperation): void;
     onMessage(cb: (op: VzyOperation) => void): void;
     onAck?(cb: (ack: VzyAck) => void): void;
+    sendAck?(ack: VzyAck): void;
     sendReconnect?(payload: VzyReconnect): void;
     onStatusChange?(cb: (status: SyncStatus) => void): void;
+    setNodes?(nodes: VzyNode[]): void;
+    getActiveNode?(): VzyNode | undefined;
+    switchNode?(nodeId: string): Promise<void>;
+    getObservability?(): {
+        activeNodeId?: string;
+        failoverCount: number;
+        crossNodeLatency: number;
+        eventSourceDistribution: Record<string, number>;
+        dedupRate: number;
+    };
     disconnect(): void;
 }
 export type SyncStatus = "idle" | "connecting" | "connected" | "offline";
@@ -67,6 +101,9 @@ export interface VzyClientConfig {
     resolver?: ConflictResolver;
     retryBaseMs?: number;
     maxRetryMs?: number;
+    nodes?: VzyNode[];
+    sequenceMode?: VzySequenceMode;
+    dedupTtlMs?: number;
 }
 export interface TransportFactoryParams {
     roomId: string;

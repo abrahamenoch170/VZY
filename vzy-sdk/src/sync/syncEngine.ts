@@ -1,6 +1,6 @@
 import { validateOperation } from "../core/operations.js";
 import { StateStore } from "../core/store.js";
-import type { StorageAdapter, SyncStatus, Transport, VzyAck, VzyOperation, VzyReconnect } from "../types/index.js";
+import type { StorageAdapter, SyncStatus, Transport, VzyAck, VzyOperation, VzyReconnect, VzySequenceMode } from "../types/index.js";
 import { OfflineQueue } from "./queue.js";
 import { WALEngine } from "./wal.js";
 
@@ -11,7 +11,7 @@ export class SyncEngine {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempts = 0;
   private readonly retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  private readonly seenOps = new Set<string>();
+  private readonly seenOps = new Map<string, number>();
   private readonly orderingBuffer = new Map<number, VzyOperation>();
   private lastAppliedSequence = 0;
 
@@ -19,7 +19,7 @@ export class SyncEngine {
     private readonly transport: Transport,
     private readonly store: StateStore,
     storage: StorageAdapter,
-    private readonly options: { retryBaseMs: number; maxRetryMs: number },
+    private readonly options: { retryBaseMs: number; maxRetryMs: number; dedupTtlMs: number; sequenceMode: VzySequenceMode },
     private readonly identity: { roomId: string; clientId: string },
     private readonly onApplied?: (op: VzyOperation) => void
   ) {
@@ -67,6 +67,8 @@ export class SyncEngine {
       clientId: this.identity.clientId,
       lastSequence: this.wal.getLastSequence()
     };
+    const activeNodeId = this.transport.getActiveNode?.()?.nodeId;
+    if (activeNodeId) reconnect.lastNodeId = activeNodeId;
     this.transport.sendReconnect?.(reconnect);
 
     await this.flushQueue();
@@ -92,6 +94,7 @@ export class SyncEngine {
   }
 
   private async onAck(ack: VzyAck): Promise<void> {
+    if (!ack.committed) return;
     const timer = this.retryTimers.get(ack.opId);
     if (timer) {
       clearTimeout(timer);
@@ -105,41 +108,53 @@ export class SyncEngine {
 
   private async onIncomingOperation(op: VzyOperation): Promise<void> {
     if (!validateOperation(op)) return;
-    if (this.seenOps.has(op.opId)) return;
+    if (this.hasSeen(op.opId)) return;
 
     if (typeof op.sequence !== "number") {
-      this.seenOps.add(op.opId);
+      this.markSeen(op.opId);
       if (!this.store.applyOperation(op)) return;
       await this.wal.putPending(op);
       this.onApplied?.(op);
       return;
     }
 
-    if (op.sequence <= this.lastAppliedSequence) {
-      this.seenOps.add(op.opId);
-      return;
-    }
+    if (this.options.sequenceMode === "global") {
+      if (op.sequence <= this.lastAppliedSequence) {
+        this.markSeen(op.opId);
+        return;
+      }
 
-    if (op.sequence !== this.lastAppliedSequence + 1) {
-      this.orderingBuffer.set(op.sequence, op);
-      this.trimOrderingBuffer();
+      if (op.sequence !== this.lastAppliedSequence + 1) {
+        this.orderingBuffer.set(op.sequence, op);
+        this.trimOrderingBuffer();
+        return;
+      }
+
+      await this.applyOrdered(op);
+      await this.drainOrderingBuffer();
       return;
     }
 
     await this.applyOrdered(op);
-    await this.drainOrderingBuffer();
   }
 
   private async applyOrdered(op: VzyOperation): Promise<void> {
-    if (this.seenOps.has(op.opId)) return;
-    this.seenOps.add(op.opId);
+    if (this.hasSeen(op.opId)) return;
+    this.markSeen(op.opId);
     if (!this.store.applyOperation(op)) return;
 
-    if (typeof op.sequence === "number") {
+    if (typeof op.sequence === "number" && op.sequence > this.lastAppliedSequence) {
       this.lastAppliedSequence = op.sequence;
       await this.wal.setLastSequence(op.sequence);
     }
     this.onApplied?.(op);
+    this.transport.sendAck?.({
+      type: "ACK",
+      opId: op.opId,
+      roomId: op.roomId,
+      sequence: op.sequence ?? this.lastAppliedSequence,
+      committed: true
+    });
   }
 
   private async drainOrderingBuffer(): Promise<void> {
@@ -172,7 +187,7 @@ export class SyncEngine {
     try {
       this.transport.send(op);
       const delay = this.computeBackoff(retryCount + 1);
-      void this.wal.updateRetry(op.opId, retryCount+1, Date.now() + delay);
+      void this.wal.updateRetry(op.opId, retryCount + 1, Date.now() + delay);
       const timer = setTimeout(() => {
         this.retryTimers.delete(op.opId);
         this.sendWithRetry(op, retryCount + 1);
@@ -209,6 +224,10 @@ export class SyncEngine {
 
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
+      const nodes = this.transport.getActiveNode ? this.transport.getActiveNode() : undefined;
+      if (!nodes && this.transport.switchNode) {
+        void this.transport.switchNode("node-1").catch(() => undefined);
+      }
       void this.connect().catch(() => {
         this.status = "offline";
         this.scheduleReconnect();
@@ -226,5 +245,22 @@ export class SyncEngine {
   private clearRetryTimers(): void {
     for (const timer of this.retryTimers.values()) clearTimeout(timer);
     this.retryTimers.clear();
+  }
+
+  private hasSeen(opId: string): boolean {
+    this.evictSeen();
+    return this.seenOps.has(opId);
+  }
+
+  private markSeen(opId: string): void {
+    this.evictSeen();
+    this.seenOps.set(opId, Date.now());
+  }
+
+  private evictSeen(): void {
+    const cutoff = Date.now() - this.options.dedupTtlMs;
+    for (const [opId, ts] of this.seenOps.entries()) {
+      if (ts < cutoff) this.seenOps.delete(opId);
+    }
   }
 }

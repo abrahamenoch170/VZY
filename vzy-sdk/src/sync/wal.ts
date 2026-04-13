@@ -42,8 +42,13 @@ export class WALEngine {
       payload: op,
       status: "pending",
       retryCount: existing?.retryCount ?? 0,
-      nextRetryAt: existing?.nextRetryAt ?? Date.now()
+      nextRetryAt: existing?.nextRetryAt ?? Date.now(),
+      timestamp: existing?.timestamp ?? op.timestamp
     };
+    const nodeId = op.nodeId ?? existing?.nodeId;
+    if (nodeId) record.nodeId = nodeId;
+    const sourceNode = op.sourceNode ?? existing?.sourceNode;
+    if (sourceNode) record.sourceNode = sourceNode;
     if (typeof existing?.sequence === "number") record.sequence = existing.sequence;
     this.records.set(op.opId, record);
     await this.persist();
@@ -52,7 +57,7 @@ export class WALEngine {
   async markAcked(opId: string, sequence: number): Promise<void> {
     const current = this.records.get(opId);
     if (!current) return;
-    this.records.set(opId, { ...current, status: "acked", sequence });
+    this.records.set(opId, { ...current, status: "acked", sequence, timestamp: current.timestamp ?? Date.now() });
     await this.setLastSequence(sequence);
     await this.persist();
   }

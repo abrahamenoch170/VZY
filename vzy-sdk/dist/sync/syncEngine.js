@@ -13,7 +13,7 @@ export class SyncEngine {
     reconnectTimer = null;
     reconnectAttempts = 0;
     retryTimers = new Map();
-    seenOps = new Set();
+    seenOps = new Map();
     orderingBuffer = new Map();
     lastAppliedSequence = 0;
     constructor(transport, store, storage, options, identity, onApplied) {
@@ -59,6 +59,9 @@ export class SyncEngine {
             clientId: this.identity.clientId,
             lastSequence: this.wal.getLastSequence()
         };
+        const activeNodeId = this.transport.getActiveNode?.()?.nodeId;
+        if (activeNodeId)
+            reconnect.lastNodeId = activeNodeId;
         this.transport.sendReconnect?.(reconnect);
         await this.flushQueue();
         await this.flushPendingWAL();
@@ -78,6 +81,8 @@ export class SyncEngine {
         this.sendWithRetry(op, 0);
     }
     async onAck(ack) {
+        if (!ack.committed)
+            return;
         const timer = this.retryTimers.get(ack.opId);
         if (timer) {
             clearTimeout(timer);
@@ -91,39 +96,50 @@ export class SyncEngine {
     async onIncomingOperation(op) {
         if (!validateOperation(op))
             return;
-        if (this.seenOps.has(op.opId))
+        if (this.hasSeen(op.opId))
             return;
         if (typeof op.sequence !== "number") {
-            this.seenOps.add(op.opId);
+            this.markSeen(op.opId);
             if (!this.store.applyOperation(op))
                 return;
             await this.wal.putPending(op);
             this.onApplied?.(op);
             return;
         }
-        if (op.sequence <= this.lastAppliedSequence) {
-            this.seenOps.add(op.opId);
-            return;
-        }
-        if (op.sequence !== this.lastAppliedSequence + 1) {
-            this.orderingBuffer.set(op.sequence, op);
-            this.trimOrderingBuffer();
+        if (this.options.sequenceMode === "global") {
+            if (op.sequence <= this.lastAppliedSequence) {
+                this.markSeen(op.opId);
+                return;
+            }
+            if (op.sequence !== this.lastAppliedSequence + 1) {
+                this.orderingBuffer.set(op.sequence, op);
+                this.trimOrderingBuffer();
+                return;
+            }
+            await this.applyOrdered(op);
+            await this.drainOrderingBuffer();
             return;
         }
         await this.applyOrdered(op);
-        await this.drainOrderingBuffer();
     }
     async applyOrdered(op) {
-        if (this.seenOps.has(op.opId))
+        if (this.hasSeen(op.opId))
             return;
-        this.seenOps.add(op.opId);
+        this.markSeen(op.opId);
         if (!this.store.applyOperation(op))
             return;
-        if (typeof op.sequence === "number") {
+        if (typeof op.sequence === "number" && op.sequence > this.lastAppliedSequence) {
             this.lastAppliedSequence = op.sequence;
             await this.wal.setLastSequence(op.sequence);
         }
         this.onApplied?.(op);
+        this.transport.sendAck?.({
+            type: "ACK",
+            opId: op.opId,
+            roomId: op.roomId,
+            sequence: op.sequence ?? this.lastAppliedSequence,
+            committed: true
+        });
     }
     async drainOrderingBuffer() {
         while (true) {
@@ -191,6 +207,10 @@ export class SyncEngine {
         this.reconnectAttempts += 1;
         this.reconnectTimer = setTimeout(() => {
             this.reconnectTimer = null;
+            const nodes = this.transport.getActiveNode ? this.transport.getActiveNode() : undefined;
+            if (!nodes && this.transport.switchNode) {
+                void this.transport.switchNode("node-1").catch(() => undefined);
+            }
             void this.connect().catch(() => {
                 this.status = "offline";
                 this.scheduleReconnect();
@@ -207,6 +227,21 @@ export class SyncEngine {
         for (const timer of this.retryTimers.values())
             clearTimeout(timer);
         this.retryTimers.clear();
+    }
+    hasSeen(opId) {
+        this.evictSeen();
+        return this.seenOps.has(opId);
+    }
+    markSeen(opId) {
+        this.evictSeen();
+        this.seenOps.set(opId, Date.now());
+    }
+    evictSeen() {
+        const cutoff = Date.now() - this.options.dedupTtlMs;
+        for (const [opId, ts] of this.seenOps.entries()) {
+            if (ts < cutoff)
+                this.seenOps.delete(opId);
+        }
     }
 }
 //# sourceMappingURL=syncEngine.js.map

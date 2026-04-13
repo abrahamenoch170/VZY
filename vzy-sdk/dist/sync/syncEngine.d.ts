@@ -1,5 +1,5 @@
 import { StateStore } from "../core/store.js";
-import type { StorageAdapter, SyncStatus, Transport, VzyOperation } from "../types/index.js";
+import type { StorageAdapter, SyncStatus, Transport, VzyOperation, VzySequenceMode } from "../types/index.js";
 export declare class SyncEngine {
     private readonly transport;
     private readonly store;
@@ -18,6 +18,8 @@ export declare class SyncEngine {
     constructor(transport: Transport, store: StateStore, storage: StorageAdapter, options: {
         retryBaseMs: number;
         maxRetryMs: number;
+        dedupTtlMs: number;
+        sequenceMode: VzySequenceMode;
     }, identity: {
         roomId: string;
         clientId: string;
@@ -40,4 +42,7 @@ export declare class SyncEngine {
     private scheduleReconnect;
     private clearReconnect;
     private clearRetryTimers;
+    private hasSeen;
+    private markSeen;
+    private evictSeen;
 }

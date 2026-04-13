@@ -16,13 +16,15 @@ type Metrics struct {
 	lastMsgIn         atomic.Int64
 	lastTick          atomic.Int64
 	messagesPerSecond atomic.Int64
+
+	pubsubPublishCount atomic.Int64
+	pubsubReceiveCount atomic.Int64
+	dedupHits          atomic.Int64
+	crossNodeLatencyMs atomic.Int64
+	droppedEvents      atomic.Int64
 }
 
-func New() *Metrics {
-	m := &Metrics{}
-	m.lastTick.Store(time.Now().Unix())
-	return m
-}
+func New() *Metrics { m := &Metrics{}; m.lastTick.Store(time.Now().Unix()); return m }
 
 func (m *Metrics) IncConnections()     { m.activeConnections.Add(1) }
 func (m *Metrics) DecConnections()     { m.activeConnections.Add(-1) }
@@ -33,6 +35,15 @@ func (m *Metrics) IncDroppedMessages() { m.droppedMessages.Add(1) }
 func (m *Metrics) IncPendingAcks()     { m.pendingAcks.Add(1) }
 func (m *Metrics) DecPendingAcks()     { m.pendingAcks.Add(-1) }
 func (m *Metrics) SetWALSize(n int64)  { m.walSizeBytes.Store(n) }
+func (m *Metrics) IncPubSubPublish()   { m.pubsubPublishCount.Add(1) }
+func (m *Metrics) IncPubSubReceive()   { m.pubsubReceiveCount.Add(1) }
+func (m *Metrics) IncDedupHits()       { m.dedupHits.Add(1) }
+func (m *Metrics) IncDroppedEvents()   { m.droppedEvents.Add(1) }
+func (m *Metrics) ObserveCrossNodeLatency(ms int64) {
+	if ms >= 0 {
+		m.crossNodeLatencyMs.Store(ms)
+	}
+}
 
 func (m *Metrics) updateRate() {
 	now := time.Now().Unix()
@@ -46,13 +57,18 @@ func (m *Metrics) updateRate() {
 func (m *Metrics) Snapshot() map[string]int64 {
 	m.updateRate()
 	return map[string]int64{
-		"active_connections":  m.activeConnections.Load(),
-		"total_rooms":         m.rooms.Load(),
-		"messages_in":         m.messagesIn.Load(),
-		"messages_out":        m.messagesOut.Load(),
-		"messages_per_second": m.messagesPerSecond.Load(),
-		"dropped_messages":    m.droppedMessages.Load(),
-		"pending_acks":        m.pendingAcks.Load(),
-		"wal_size_bytes":      m.walSizeBytes.Load(),
+		"active_connections":    m.activeConnections.Load(),
+		"room_count":            m.rooms.Load(),
+		"messages_in":           m.messagesIn.Load(),
+		"messages_out":          m.messagesOut.Load(),
+		"messages_per_second":   m.messagesPerSecond.Load(),
+		"dropped_messages":      m.droppedMessages.Load(),
+		"pending_acks":          m.pendingAcks.Load(),
+		"wal_size_bytes":        m.walSizeBytes.Load(),
+		"pubsub_publish_count":  m.pubsubPublishCount.Load(),
+		"pubsub_receive_count":  m.pubsubReceiveCount.Load(),
+		"dedup_hits":            m.dedupHits.Load(),
+		"cross_node_latency_ms": m.crossNodeLatencyMs.Load(),
+		"dropped_events":        m.droppedEvents.Load(),
 	}
 }

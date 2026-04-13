@@ -14,9 +14,10 @@ class MockTransport {
     send(op) {
         this.sent.push(op);
         const sequence = op.sequence ?? this.sent.length;
-        this.ackCb?.({ type: "ACK", opId: op.opId, roomId: op.roomId, sequence });
+        this.ackCb?.({ type: "ACK", opId: op.opId, roomId: op.roomId, sequence, committed: true });
         this.peer?.messageCb?.({ ...op, sequence });
     }
+    sendAck(_ack) { }
     sendReconnect(payload) {
         this.reconnectPayloads.push(payload);
     }
