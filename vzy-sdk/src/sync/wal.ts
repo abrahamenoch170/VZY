@@ -1,0 +1,66 @@
+import type { StorageAdapter, VzyOperation, WALRecord } from "../types/index.js";
+
+const WAL_KEY = "__vzy_wal_records__";
+const LAST_SEQUENCE_KEY = "__vzy_last_sequence__";
+
+export class WALEngine {
+  private records = new Map<string, WALRecord>();
+
+  constructor(private readonly storage: StorageAdapter) {}
+
+  async hydrate(): Promise<void> {
+    const persisted = (await this.storage.get<WALRecord[]>(WAL_KEY)) ?? [];
+    this.records = new Map(persisted.map((record) => [record.opId, record]));
+  }
+
+  async writePending(op: VzyOperation): Promise<void> {
+    if (!this.records.has(op.opId)) {
+      this.records.set(op.opId, { opId: op.opId, roomId: op.roomId, payload: op, status: "pending" });
+      await this.persist();
+    }
+  }
+
+  async markAcked(opId: string, sequence: number): Promise<void> {
+    const record = this.records.get(opId);
+    if (!record) return;
+    this.records.set(opId, { ...record, status: "acked", sequence });
+    await this.persist();
+    await this.setLastSequence(sequence);
+  }
+
+  async persistAppliedRemote(op: VzyOperation): Promise<void> {
+    if (typeof op.sequence !== "number") return;
+    this.records.set(op.opId, {
+      opId: op.opId,
+      roomId: op.roomId,
+      payload: op,
+      status: "acked",
+      sequence: op.sequence
+    });
+    await this.persist();
+    await this.setLastSequence(op.sequence);
+  }
+
+  getPending(): WALRecord[] {
+    return [...this.records.values()].filter((record) => record.status === "pending");
+  }
+
+  getAll(): WALRecord[] {
+    return [...this.records.values()];
+  }
+
+  async getLastSequence(): Promise<number> {
+    return (await this.storage.get<number>(LAST_SEQUENCE_KEY)) ?? 0;
+  }
+
+  async setLastSequence(sequence: number): Promise<void> {
+    const existing = await this.getLastSequence();
+    if (sequence > existing) {
+      await this.storage.set<number>(LAST_SEQUENCE_KEY, sequence);
+    }
+  }
+
+  private async persist(): Promise<void> {
+    await this.storage.set<WALRecord[]>(WAL_KEY, [...this.records.values()]);
+  }
+}
