@@ -92,6 +92,7 @@ export class SyncEngine {
   }
 
   private async onAck(ack: VzyAck): Promise<void> {
+    if (!ack.committed) return;
     const timer = this.retryTimers.get(ack.opId);
     if (timer) {
       clearTimeout(timer);
@@ -140,6 +141,13 @@ export class SyncEngine {
       await this.wal.setLastSequence(op.sequence);
     }
     this.onApplied?.(op);
+    this.transport.sendAck?.({
+      type: "ACK",
+      opId: op.opId,
+      roomId: op.roomId,
+      sequence: op.sequence ?? this.lastAppliedSequence,
+      committed: true
+    });
   }
 
   private async drainOrderingBuffer(): Promise<void> {

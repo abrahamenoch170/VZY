@@ -78,6 +78,8 @@ export class SyncEngine {
         this.sendWithRetry(op, 0);
     }
     async onAck(ack) {
+        if (!ack.committed)
+            return;
         const timer = this.retryTimers.get(ack.opId);
         if (timer) {
             clearTimeout(timer);
@@ -124,6 +126,13 @@ export class SyncEngine {
             await this.wal.setLastSequence(op.sequence);
         }
         this.onApplied?.(op);
+        this.transport.sendAck?.({
+            type: "ACK",
+            opId: op.opId,
+            roomId: op.roomId,
+            sequence: op.sequence ?? this.lastAppliedSequence,
+            committed: true
+        });
     }
     async drainOrderingBuffer() {
         while (true) {

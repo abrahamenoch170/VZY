@@ -45,6 +45,11 @@ export class WebSocketTransport {
             throw new Error("websocket is not connected");
         this.ws.send(JSON.stringify({ event: "operation", data: op }));
     }
+    sendAck(ack) {
+        if (!this.ws || this.ws.readyState !== OPEN_STATE)
+            return;
+        this.ws.send(JSON.stringify(ack));
+    }
     sendReconnect(payload) {
         if (!this.ws || this.ws.readyState !== OPEN_STATE)
             return;
@@ -68,7 +73,7 @@ export class WebSocketTransport {
             const parsed = JSON.parse(raw);
             if (parsed.type === "ACK") {
                 const ack = parsed;
-                if (ack.opId && ack.roomId && typeof ack.sequence === "number") {
+                if (ack.opId && ack.roomId && typeof ack.sequence === "number" && ack.committed === true) {
                     this.ackCb?.(ack);
                 }
                 return;

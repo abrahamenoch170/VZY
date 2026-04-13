@@ -49,6 +49,11 @@ export class WebSocketTransport implements Transport {
     this.ws.send(JSON.stringify({ event: "operation", data: op }));
   }
 
+  sendAck(ack: VzyAck): void {
+    if (!this.ws || this.ws.readyState !== OPEN_STATE) return;
+    this.ws.send(JSON.stringify(ack));
+  }
+
   sendReconnect(payload: VzyReconnect): void {
     if (!this.ws || this.ws.readyState !== OPEN_STATE) return;
     this.ws.send(JSON.stringify(payload));
@@ -76,7 +81,7 @@ export class WebSocketTransport implements Transport {
       const parsed = JSON.parse(raw) as Record<string, unknown>;
       if (parsed.type === "ACK") {
         const ack = parsed as unknown as VzyAck;
-        if (ack.opId && ack.roomId && typeof ack.sequence === "number") {
+        if (ack.opId && ack.roomId && typeof ack.sequence === "number" && ack.committed === true) {
           this.ackCb?.(ack);
         }
         return;
