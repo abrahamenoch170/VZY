@@ -1,0 +1,76 @@
+const WAL_KEY = "__vzy_wal_records__";
+const LAST_SEQUENCE_KEY = "__vzy_last_sequence__";
+export class WALEngine {
+    storage;
+    records = new Map();
+    lastSequence = 0;
+    constructor(storage) {
+        this.storage = storage;
+    }
+    async hydrate() {
+        const persisted = (await this.storage.get(WAL_KEY)) ?? [];
+        for (const rec of persisted) {
+            this.records.set(rec.opId, rec);
+            if (typeof rec.sequence === "number" && rec.sequence > this.lastSequence) {
+                this.lastSequence = rec.sequence;
+            }
+        }
+        const storedSeq = await this.storage.get(LAST_SEQUENCE_KEY);
+        if (typeof storedSeq === "number" && storedSeq > this.lastSequence) {
+            this.lastSequence = storedSeq;
+        }
+    }
+    getLastSequence() {
+        return this.lastSequence;
+    }
+    async setLastSequence(seq) {
+        if (seq <= this.lastSequence)
+            return;
+        this.lastSequence = seq;
+        await this.storage.set(LAST_SEQUENCE_KEY, seq);
+    }
+    async putPending(op) {
+        const existing = this.records.get(op.opId);
+        if (existing?.status === "acked")
+            return;
+        const record = {
+            opId: op.opId,
+            roomId: op.roomId,
+            payload: op,
+            status: "pending",
+            retryCount: existing?.retryCount ?? 0,
+            nextRetryAt: existing?.nextRetryAt ?? Date.now()
+        };
+        if (typeof existing?.sequence === "number")
+            record.sequence = existing.sequence;
+        this.records.set(op.opId, record);
+        await this.persist();
+    }
+    async markAcked(opId, sequence) {
+        const current = this.records.get(opId);
+        if (!current)
+            return;
+        this.records.set(opId, { ...current, status: "acked", sequence });
+        await this.setLastSequence(sequence);
+        await this.persist();
+    }
+    listPending() {
+        return [...this.records.values()]
+            .filter((r) => r.status === "pending")
+            .sort((a, b) => a.payload.timestamp - b.payload.timestamp);
+    }
+    getAll() {
+        return [...this.records.values()];
+    }
+    async updateRetry(opId, retryCount, nextRetryAt) {
+        const rec = this.records.get(opId);
+        if (!rec || rec.status !== "pending")
+            return;
+        this.records.set(opId, { ...rec, retryCount, nextRetryAt });
+        await this.persist();
+    }
+    async persist() {
+        await this.storage.set(WAL_KEY, [...this.records.values()]);
+    }
+}
+//# sourceMappingURL=wal.js.map
