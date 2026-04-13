@@ -5,10 +5,9 @@ import (
 	"encoding/json"
 	"log/slog"
 	"sync"
-	"time"
 
 	"vzy-relay/internal/config"
-	"vzy-relay/internal/dedupe"
+	"vzy-relay/internal/ledger"
 	"vzy-relay/internal/metrics"
 	"vzy-relay/internal/protocol"
 	"vzy-relay/internal/store"
@@ -41,6 +40,7 @@ type Room struct {
 	broadcast   chan roomBroadcast
 	ack         chan ackMessage
 	done        chan struct{}
+	stopOnce    sync.Once
 	sequence    uint64
 	pendingAcks map[string]map[string]protocol.Operation
 
@@ -48,6 +48,7 @@ type Room struct {
 	metrics *metrics.Metrics
 	store   *store.MemoryStore
 	wal     *wal.WAL
+	ledger  *ledger.CommitLedger
 	logger  *slog.Logger
 }
 
@@ -58,12 +59,12 @@ type Hub struct {
 	metrics *metrics.Metrics
 	store   *store.MemoryStore
 	wal     *wal.WAL
-	dedupe  *dedupe.Cache
+	ledger  *ledger.CommitLedger
 	logger  *slog.Logger
 }
 
 func New(cfg config.Config, m *metrics.Metrics, st *store.MemoryStore, w *wal.WAL, logger *slog.Logger) *Hub {
-	return &Hub{rooms: make(map[string]*Room), cfg: cfg, metrics: m, store: st, wal: w, dedupe: dedupe.New(time.Duration(cfg.DedupeTTLSec) * time.Second), logger: logger}
+	return &Hub{rooms: make(map[string]*Room), cfg: cfg, metrics: m, store: st, wal: w, ledger: ledger.NewCommitLedger(), logger: logger}
 }
 
 func (h *Hub) Register(c Client) {
@@ -82,12 +83,13 @@ func (h *Hub) Unregister(c Client) {
 }
 
 func (h *Hub) Publish(roomID, fromClientID string, op protocol.Operation) error {
-	if h.dedupe.SeenOrAdd(op.OpID) {
+	if entry, ok := h.ledger.Get(op.OpID); ok && entry.Committed {
+		if room := h.getRoom(roomID); room != nil {
+			room.sendAckToClient(fromClientID, op.OpID, entry.Sequence, true)
+		}
 		return nil
 	}
-	h.mu.RLock()
-	room := h.rooms[roomID]
-	h.mu.RUnlock()
+	room := h.getRoom(roomID)
 	if room == nil {
 		room = h.getOrCreateRoom(roomID)
 	}
@@ -110,12 +112,14 @@ func (h *Hub) Replay(roomID string, c Client) {
 		return
 	}
 	for _, op := range h.store.ReplayAfterSequence(roomID, c.LastSequence()) {
-		payload, err := protocol.MarshalBroadcast(op)
-		if err != nil {
-			continue
-		}
-		if !c.Send(payload) {
-			return
+		if entry, ok := h.ledger.Get(op.OpID); ok && entry.Committed {
+			payload, err := protocol.MarshalBroadcast(op)
+			if err != nil {
+				continue
+			}
+			if !c.Send(payload) {
+				return
+			}
 		}
 	}
 }
@@ -129,7 +133,7 @@ func (h *Hub) Shutdown(ctx context.Context) {
 	h.mu.Unlock()
 
 	for _, r := range rooms {
-		close(r.done)
+		r.stop()
 	}
 
 	for _, r := range rooms {
@@ -145,10 +149,19 @@ func (h *Hub) RestoreFromWAL(opsByRoom map[string][]protocol.Operation, seqByRoo
 	for roomID, ops := range opsByRoom {
 		r := h.getOrCreateRoom(roomID)
 		r.sequence = seqByRoom[roomID]
+		for _, op := range ops {
+			h.ledger.Restore(op.OpID, ledger.Entry{Committed: true, Sequence: op.Sequence, ClientID: op.ClientID, RoomID: op.RoomID})
+		}
 		if h.store != nil {
 			h.store.Restore(ops)
 		}
 	}
+}
+
+func (h *Hub) getRoom(roomID string) *Room {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.rooms[roomID]
 }
 
 func (h *Hub) getOrCreateRoom(roomID string) *Room {
@@ -170,6 +183,7 @@ func (h *Hub) getOrCreateRoom(roomID string) *Room {
 		metrics:     h.metrics,
 		store:       h.store,
 		wal:         h.wal,
+		ledger:      h.ledger,
 		logger:      h.logger.With("roomId", roomID),
 	}
 	h.rooms[roomID] = r
@@ -188,7 +202,7 @@ func (r *Room) run(h *Hub) {
 		delete(h.rooms, r.id)
 		h.metrics.SetRooms(len(h.rooms))
 		h.mu.Unlock()
-		close(r.done)
+		r.stop()
 	}()
 
 	for {
@@ -227,12 +241,13 @@ func (r *Room) run(h *Hub) {
 				r.metrics.DecPendingAcks()
 			}
 		case msg := <-r.broadcast:
-			r.sequence++
-			msg.op.Sequence = r.sequence
-			payload, err := protocol.MarshalBroadcast(msg.op)
-			if err != nil {
+			if entry, exists := r.ledger.Get(msg.op.OpID); exists && entry.Committed {
+				r.sendAckToClient(msg.fromClientID, msg.op.OpID, entry.Sequence, true)
 				continue
 			}
+
+			r.sequence++
+			msg.op.Sequence = r.sequence
 			if r.wal != nil {
 				if err := r.wal.Append(msg.op); err != nil {
 					r.logger.Error("wal append failed", "error", err)
@@ -240,8 +255,16 @@ func (r *Room) run(h *Hub) {
 				}
 				r.metrics.SetWALSize(r.wal.Size())
 			}
+			r.ledger.MarkCommitted(msg.op.OpID, msg.op.RoomID, msg.op.ClientID, msg.op.Sequence)
+
 			if r.store != nil {
 				r.store.Append(msg.op)
+			}
+
+			r.sendAckToClient(msg.fromClientID, msg.op.OpID, msg.op.Sequence, true)
+			payload, err := protocol.MarshalBroadcast(msg.op)
+			if err != nil {
+				continue
 			}
 			r.metrics.IncMessagesIn()
 			for id, c := range r.clients {
@@ -275,6 +298,20 @@ func (r *Room) run(h *Hub) {
 	}
 }
 
+func (r *Room) sendAckToClient(clientID, opID string, sequence uint64, committed bool) {
+	c := r.clients[clientID]
+	if c == nil {
+		return
+	}
+	payload, err := protocol.MarshalAck(opID, r.id, sequence, committed)
+	if err != nil {
+		return
+	}
+	if c.Send(payload) {
+		r.metrics.IncMessagesOut()
+	}
+}
+
 func (r *Room) sendSystem(event string, data any, skipClientID string) {
 	payload, err := protocol.MarshalSystemEvent(event, data)
 	if err != nil {
@@ -295,4 +332,8 @@ func MarshalHeartbeat(roomID string) []byte {
 	payload, _ := json.Marshal(map[string]string{"roomId": roomID, "status": "ok"})
 	msg, _ := json.Marshal(protocol.Envelope{Event: "heartbeat", Data: payload})
 	return msg
+}
+
+func (r *Room) stop() {
+	r.stopOnce.Do(func() { close(r.done) })
 }

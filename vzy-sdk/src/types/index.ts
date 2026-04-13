@@ -18,6 +18,7 @@ export interface VzyAck {
   opId: string;
   roomId: string;
   sequence: number;
+  committed: boolean;
 }
 
 export interface VzyReconnect {
@@ -61,6 +62,7 @@ export interface Transport {
   send(op: VzyOperation): void;
   onMessage(cb: (op: VzyOperation) => void): void;
   onAck?(cb: (ack: VzyAck) => void): void;
+  sendAck?(ack: VzyAck): void;
   sendReconnect?(payload: VzyReconnect): void;
   onStatusChange?(cb: (status: SyncStatus) => void): void;
   disconnect(): void;

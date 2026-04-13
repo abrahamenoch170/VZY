@@ -14,10 +14,11 @@ import (
 )
 
 type WAL struct {
-	mu   sync.Mutex
-	path string
-	file *os.File
-	size int64
+	mu    sync.Mutex
+	path  string
+	file  *os.File
+	size  int64
+	opIDs map[string]struct{}
 }
 
 func Open(path string) (*WAL, error) {
@@ -30,12 +31,16 @@ func Open(path string) (*WAL, error) {
 		_ = f.Close()
 		return nil, err
 	}
-	return &WAL{path: path, file: f, size: st.Size()}, nil
+	return &WAL{path: path, file: f, size: st.Size(), opIDs: make(map[string]struct{})}, nil
 }
 
 func (w *WAL) Append(op protocol.Operation) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+
+	if _, exists := w.opIDs[op.OpID]; exists {
+		return nil
+	}
 
 	payload, err := json.Marshal(op)
 	if err != nil {
@@ -48,6 +53,7 @@ func (w *WAL) Append(op protocol.Operation) error {
 		return err
 	}
 	w.size += int64(n)
+	w.opIDs[op.OpID] = struct{}{}
 	return w.file.Sync()
 }
 
@@ -63,6 +69,7 @@ func (w *WAL) Recover() (map[string][]protocol.Operation, map[string]uint64, err
 
 	byRoom := make(map[string][]protocol.Operation)
 	seqByRoom := make(map[string]uint64)
+	seen := make(map[string]struct{})
 	s := bufio.NewScanner(f)
 	for s.Scan() {
 		line := s.Text()
@@ -83,6 +90,10 @@ func (w *WAL) Recover() (map[string][]protocol.Operation, map[string]uint64, err
 			continue
 		}
 		op.Sequence = seq
+		if _, exists := seen[op.OpID]; exists {
+			continue
+		}
+		seen[op.OpID] = struct{}{}
 		byRoom[op.RoomID] = append(byRoom[op.RoomID], op)
 		if seq > seqByRoom[op.RoomID] {
 			seqByRoom[op.RoomID] = seq
@@ -91,6 +102,7 @@ func (w *WAL) Recover() (map[string][]protocol.Operation, map[string]uint64, err
 	if err := s.Err(); err != nil {
 		return nil, nil, err
 	}
+	w.opIDs = seen
 	return byRoom, seqByRoom, nil
 }
 

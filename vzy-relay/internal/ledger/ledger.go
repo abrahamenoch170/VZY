@@ -1,36 +1,43 @@
-// package internal
-
 package ledger
 
-import (
-	"log"
-	"sync"
-)
+import "sync"
 
-// CommitLedger tracks commit operations ensuring idempotency across crashes.
+type Entry struct {
+	Committed bool
+	Sequence  uint64
+	ClientID  string
+	RoomID    string
+}
+
 type CommitLedger struct {
-	mu      sync.Mutex
-	commits map[string]bool // tracks completed commits
+	mu      sync.RWMutex
+	commits map[string]Entry
 }
 
-// NewCommitLedger creates a new instance of CommitLedger.
 func NewCommitLedger() *CommitLedger {
-	return &CommitLedger{commits: make(map[string]bool)}
+	return &CommitLedger{commits: make(map[string]Entry)}
 }
 
-// Commit records a commit with the given id if it has not been committed before.
-func (cl *CommitLedger) Commit(id string) bool {
+func (cl *CommitLedger) MarkCommitted(opID, roomID, clientID string, sequence uint64) Entry {
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
+	entry := Entry{Committed: true, Sequence: sequence, ClientID: clientID, RoomID: roomID}
+	cl.commits[opID] = entry
+	return entry
+}
 
-	// Check if the commit is already processed.
-	if _, exists := cl.commits[id]; exists {
-		log.Printf("Commit %s already processed. Ignoring.", id)
-		return false
+func (cl *CommitLedger) Get(opID string) (Entry, bool) {
+	cl.mu.RLock()
+	defer cl.mu.RUnlock()
+	entry, ok := cl.commits[opID]
+	return entry, ok
+}
+
+func (cl *CommitLedger) Restore(opID string, entry Entry) {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	if current, ok := cl.commits[opID]; ok && current.Sequence >= entry.Sequence {
+		return
 	}
-
-	// Record the commit.
-	cl.commits[id] = true
-	log.Printf("Commit %s processed successfully.", id)
-	return true
+	cl.commits[opID] = entry
 }

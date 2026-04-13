@@ -11,6 +11,7 @@ export declare class WebSocketTransport implements Transport {
     constructor(serverUrl: string, roomId: string, clientId: string, lastSequenceProvider?: () => number);
     connect(): Promise<void>;
     send(op: VzyOperation): void;
+    sendAck(ack: VzyAck): void;
     sendReconnect(payload: VzyReconnect): void;
     onMessage(cb: (op: VzyOperation) => void): void;
     onAck(cb: (ack: VzyAck) => void): void;

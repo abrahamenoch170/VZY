@@ -18,9 +18,11 @@ class MockTransport implements Transport {
   send(op: VzyOperation): void {
     this.sent.push(op);
     const sequence = op.sequence ?? this.sent.length;
-    this.ackCb?.({ type: "ACK", opId: op.opId, roomId: op.roomId, sequence });
+    this.ackCb?.({ type: "ACK", opId: op.opId, roomId: op.roomId, sequence, committed: true });
     this.peer?.messageCb?.({ ...op, sequence });
   }
+
+  sendAck(_ack: VzyAck): void {}
 
   sendReconnect(payload: VzyReconnect): void {
     this.reconnectPayloads.push(payload);
